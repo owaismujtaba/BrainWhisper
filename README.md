@@ -1,128 +1,107 @@
-# BrainWhisper: EEG-to-Text Model
+# BrainWhisper
 
-BrainWhisper is a deep learning project designed to translate EEG (Electroencephalography) brain signals directly into text. It leverages the power of **OpenAI's Whisper** model, adapting its robust decoder to understand neural representations of speech.
+**EEG-to-Text Decoding via Hallucinated Audio Modality**
 
-## 🚀 Features
+A modular implementation of the "Hallucinating a Modality" approach for converting EEG signals to text using synthetic audio as an intermediary representation.
 
-- **EEG Encoder**: A custom transformer-based encoder designed for EEG signals.
-  - **Multi-Scale Convolution**: Captures features at different frequency bands (Delta, Theta, Alpha, Beta, Gamma).
-  - **Gated Adapter**: Aligns EEG feature distributions with the text latent space.
-  - **Adaptive Normalization**: Ensures statistical compatibility with the Whisper decoder.
-- **Whisper Integration**: Uses pre-trained OpenAI Whisper (e.g., `openai/whisper-tiny`) as the text decoder.
-- **Hybrid Training**:
-  - **Cross-Attention Tuning**: Unfreezes specific layers to adapt Whisper to EEG inputs.
-  - **CTC Auxiliary Loss**: Uses Connectionist Temporal Classification (CTC) to align phonetic features during training.
-- **Data Augmentation**: Gaussian noise injection for robust training.
+## Quick Start
 
-## 🧠 Architecture
+### 1. Generate Synthetic Audio
+```bash
+.venv/bin/python run.py --mode generate_audio --config config.yaml
+```
 
-The model consists of two main components:
+### 2. Train EEG Encoder
+```bash
+.venv/bin/python run.py --mode train --config config.yaml
+```
 
-1.  **EEG Encoder**: 
-    - Takes raw EEG features (e.g., Mel-spectrograms or raw signals) as input.
-    - Applies multi-scale convolutions for temporal downsampling.
-    - Uses a Transformer Encoder to capture long-range dependencies.
-    - Projects features to `d_model` dimension of the specific Whisper model.
+## Project Structure
 
-2.  **Whisper Decoder**:
-    - Generates text tokens autoregressively.
-    - Cross-attention layers attend to the output of the EEG Encoder instead of Mel-spectrograms.
+```
+BrainWhisper/
+├── run.py                          # Main entry point
+├── config.yaml                     # Configuration file
+├── src/brainwhisper/              # Main package
+│   ├── models/                    # Model architectures
+│   │   └── eeg_encoder.py        # EEG encoder (CNN + Transformer)
+│   ├── data/                      # Data handling
+│   │   ├── dataset.py            # EEG-Audio dataset
+│   │   └── audio_generator.py    # TTS audio generation
+│   ├── training/                  # Training logic
+│   │   └── trainer.py            # Teacher-Student trainer
+│   └── utils/                     # Utilities
+│       └── config.py             # Config management
+├── checkpoints/                   # Model checkpoints
+└── data/                         # Data directory
+    ├── raw/hdf5_data_final/      # EEG data (HDF5)
+    └── audio_ground_truth/       # Generated audio
+```
 
-## 📦 Installation
+## Configuration
 
-1.  **Clone the repository**:
-    ```bash
-    git clone https://github.com/yourusername/BrainWhisper.git
-    cd BrainWhisper
-    ```
+All parameters are in `config.yaml`:
 
-2.  **Install dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
+- **Paths**: Data directories, checkpoint location
+- **Audio**: TTS model, GPU settings
+- **Model**: Architecture parameters (channels, layers, etc.)
+- **Training**: Batch size, epochs, learning rate
+- **Data**: Train/val splits, optional limit for debugging
 
-## 📂 Data Preparation
+## Architecture
 
-The model expects data in **HDF5 format**.
-- **Directory Structure**:
-  ```text
-  data/
-  └── raw/
-      └── hdf5_data_final/
-          ├── train/data_train.hdf5
-          ├── val/data_val.hdf5
-          └── test/data_test.hdf5
-  ```
-- **HDF5 Content**:
-  Each file should contain groups for trials, with datasets:
-  - `input_features`: EEG signal matrix (Shape: `[Time, Channels]`, e.g., `[2000, 512]`)
-  - `transcription`: ASCII codes of the target text (Shape: `[Length]`)
+### EEG Encoder
+- **Input**: EEG features (Time, 512)
+- **CNN Backbone**: 4 layers of 1D convolutions
+- **Temporal Modeling**: 2-layer Transformer Encoder
+- **Adapter**: Linear projection to Whisper embedding space
+- **Output**: Embeddings (Batch, Time, 512)
 
-## ⚙️ Configuration
+### Training Strategy
+1. **Teacher (Frozen)**: Whisper encoder processes synthetic audio
+2. **Student (Trainable)**: EEG encoder learns to match teacher embeddings
+3. **Loss**: MSE between student and teacher outputs
 
-Hyperparameters are managed in `configs/default.yaml`. Key settings include:
+## Environment
 
+- **Python**: 3.10 (via `uv` virtual environment)
+- **Key Dependencies**:
+  - `torch==2.10.0`
+  - `openai-whisper==20250625`
+  - `TTS==0.22.0`
+  - `h5py`, `soundfile`, `pyyaml`
+
+## Usage Examples
+
+### Test Run (4 samples, 1 epoch)
+```bash
+.venv/bin/python run.py --mode train --config config_test.yaml
+```
+
+### Full Training (50 epochs)
+Edit `config.yaml`:
 ```yaml
-data:
-  max_eeg_length: 2000      # Max time steps for EEG
-  gaussian_noise: 0.1       # Augmentation strength
-
-model:
-  whisper_model_name: "openai/whisper-tiny" # Base model
-  freeze_decoder: true      # Freeze Whisper weights (except cross-attn)
-  eeg_input_dim: 512        # Input EEG feature dimension
-  encoder_layers: 6         # Depth of EEG Encoder
-
 training:
-  batch_size: 80
-  learning_rate: 1.0e-4
-  ctc_weight: 0.3           # Weight for auxiliary CTC loss
+  epochs: 50
+  batch_size: 8
+data:
+  limit: null  # Use full dataset
 ```
 
-## 🏃 Usage
-
-### 1. Training
-
-To train the model using the default configuration:
-
+Then run:
 ```bash
-./run.py train --config configs/default.yaml
+.venv/bin/python run.py --mode train --config config.yaml
 ```
 
-### 2. Inference
+## Checkpoints
 
-To generate text from EEG data using a trained checkpoint:
+Saved to `checkpoints/`:
+- `best_eeg_encoder.pth` - Best validation loss
+- `last_eeg_encoder.pth` - Latest epoch
+- `checkpoint_epoch_N.pth` - Periodic saves
 
-```bash
-./run.py inference --checkpoint checkpoints/best_model.pt --input data/test/data_test.hdf5 --output results.csv
-```
+## Notes
 
-### 3. Testing Pipeline
-
-To verify that the installation and pipeline are working correctly (runs a forward pass on a sample):
-
-```bash
-python test_pipeline.py
-```
-
-## 📁 Project Structure
-
-```text
-.
-├── run.py                  # CLI Entry point
-├── test_pipeline.py        # Sanity check script
-├── configs/                # Configuration files
-├── data/                   # Data directory
-├── src/
-│   └── whisper_eeg/
-│       ├── dataset.py      # HDF5 Data loading
-│       ├── model.py        # EEGEncoder & EEGWhisperModel
-│       ├── trainer.py      # Training loop & Validation
-│       ├── config.py       # Config dataclasses
-│       └── cli/            # CLI command implementations
-└── requirements.txt        # Python dependencies
-```
-
-## 📜 License
-
-[MIT License](LICENSE)
+- Audio generation uses Coqui TTS (no ffmpeg dependency via soundfile)
+- Variable-length EEG sequences handled via padding
+- Automatic temporal alignment between student and teacher outputs

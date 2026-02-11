@@ -1,36 +1,92 @@
 #!/usr/bin/env python3
+"""
+BrainWhisper: EEG-to-Text via Hallucinated Audio Modality
+
+Main entry point for training and audio generation.
+"""
+
 import sys
 import argparse
 from pathlib import Path
 
-# Ensure src is in path
-sys.path.append(str(Path(__file__).parent / "src"))
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from whisper_eeg.cli.train import train
-from whisper_eeg.cli.inference import run_inference
+from brainwhisper.utils import load_config
+from brainwhisper.data import AudioGenerator
+from brainwhisper.training import Trainer
+
+
+def generate_audio(config):
+    """Generate synthetic audio from text transcriptions"""
+    print("=" * 60)
+    print("AUDIO GENERATION MODE")
+    print("=" * 60)
+    
+    generator = AudioGenerator(
+        tts_model=config.audio.tts_model,
+        use_gpu=config.audio.use_gpu
+    )
+    
+    # Generate for validation split
+    print(f"\nGenerating audio for validation split...")
+    generator.generate_from_hdf5(
+        data_dir=config.paths.data_dir,
+        output_dir=config.paths.audio_dir,
+        split=config.data.val_split,
+        limit=config.data.limit
+    )
+    
+    # Generate for training split
+    print(f"\nGenerating audio for training split...")
+    generator.generate_from_hdf5(
+        data_dir=config.paths.data_dir,
+        output_dir=config.paths.audio_dir,
+        split=config.data.train_split,
+        limit=config.data.limit
+    )
+    
+    print("\nAudio generation complete!")
+
+
+def train_model(config):
+    """Train EEG encoder"""
+    print("=" * 60)
+    print("TRAINING MODE")
+    print("=" * 60)
+    
+    trainer = Trainer(config)
+    trainer.train()
+
 
 def main():
-    parser = argparse.ArgumentParser(description="EEG-to-Text Runner")
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
-    
-    # Train command
-    train_parser = subparsers.add_parser("train", help="Train the model")
-    train_parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
-    
-    inference_parser = subparsers.add_parser("inference", help="Run inference")
-    inference_parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model.pt", help="Path to model checkpoint")
-    inference_parser.add_argument("--input", type=str, default=None, help="Path to HDF5 file (optional, defaults to test set)")
-    inference_parser.add_argument("--output", type=str, default="results/predictions.csv", help="Output file")
-    inference_parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"], help="Dataset split to use (default: val)")
+    parser = argparse.ArgumentParser(description="BrainWhisper: EEG-to-Text")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["generate_audio", "train"],
+        required=True,
+        help="Mode to run: generate_audio or train"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to configuration file (default: config.yaml)"
+    )
     
     args = parser.parse_args()
     
-    if args.command == "train":
-        train(args.config)
-    elif args.command == "inference":
-        run_inference(args.checkpoint, args.input, args.output, args.split)
-    else:
-        parser.print_help()
+    # Load configuration
+    print(f"Loading configuration from {args.config}...")
+    config = load_config(args.config)
+    
+    # Run selected mode
+    if args.mode == "generate_audio":
+        generate_audio(config)
+    elif args.mode == "train":
+        train_model(config)
+
 
 if __name__ == "__main__":
     main()

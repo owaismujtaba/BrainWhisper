@@ -1,0 +1,45 @@
+# BrainWhisper Configuration
+
+# Paths
+paths:
+  data_dir: "data/raw/hdf5_data_final"
+  audio_dir: "data/audio_ground_truth"
+  checkpoint_dir: "checkpoints"
+
+# Audio Generation
+audio:
+  tts_model: "tts_models/en/ljspeech/tacotron2-DDC"
+  output_format: "wav"
+  use_gpu: true
+
+# Model Architecture
+model:
+  eeg_channels: 512
+  whisper_model: "base"  # base, small, medium, large
+  hidden_dim: 256
+  num_cnn_layers: 4
+  kernel_size: 3
+  stride: 1
+  dropout: 0.1
+  num_transformer_layers: 2
+  num_attention_heads: 4
+
+# Training
+training:
+  batch_size: 8
+  epochs: 50
+  learning_rate: 0.0001
+  num_workers: 4
+  device: "cuda"  # cuda or cpu
+  save_best: true
+  
+# Data
+data:
+  train_split: "train"
+  val_split: "val"
+  limit: null  # Set to integer for debugging (e.g., 100)
+
+# Logging
+logging:
+  log_interval: 10  # Log every N batches
+  save_interval: 1  # Save checkpoint every N epochs
