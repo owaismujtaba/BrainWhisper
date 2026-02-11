@@ -9,7 +9,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 from ..models import EEGEncoder
-from ..data import EEGDataset, collate_fn
+from ..dataset import EEGDataset, collate_fn
 
 
 class Trainer:
