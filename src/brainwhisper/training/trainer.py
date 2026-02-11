@@ -1,4 +1,4 @@
-"""Training logic for EEG encoder"""
+"""Training logic for EEG encoder with multi-GPU support"""
 
 import os
 import torch
@@ -9,11 +9,11 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 from ..models import EEGEncoder
-from ..dataset import EEGDataset, collate_fn
+from ..data import EEGDataset, collate_fn
 
 
 class Trainer:
-    """Trainer for EEG Encoder using Teacher-Student learning"""
+    """Trainer for EEG Encoder using Teacher-Student learning with multi-GPU support"""
     
     def __init__(self, config):
         """
@@ -23,9 +23,19 @@ class Trainer:
             config: Configuration object
         """
         self.config = config
-        self.device = torch.device(config.training.device if torch.cuda.is_available() else "cpu")
         
-        print(f"Using device: {self.device}")
+        # Setup device
+        if torch.cuda.is_available() and config.training.device == "cuda":
+            self.device = torch.device("cuda")
+            self.use_multi_gpu = config.training.distributed and torch.cuda.device_count() > 1
+            if self.use_multi_gpu:
+                print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+            else:
+                print(f"Using single GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            self.device = torch.device("cpu")
+            self.use_multi_gpu = False
+            print("Using CPU")
         
         # Load Teacher (Whisper)
         print("Loading Whisper Teacher model...")
@@ -34,6 +44,10 @@ class Trainer:
         self.teacher_encoder.eval()
         for p in self.teacher_encoder.parameters():
             p.requires_grad = False
+        
+        # Wrap teacher with DataParallel if using multi-GPU
+        if self.use_multi_gpu:
+            self.teacher_encoder = nn.DataParallel(self.teacher_encoder)
         
         # Initialize Student (EEG Encoder)
         print("Initializing EEG Encoder Student...")
@@ -47,6 +61,13 @@ class Trainer:
             num_layers=config.model.num_cnn_layers,
             dropout=config.model.dropout
         ).to(self.device)
+        
+        # Wrap student with DataParallel if using multi-GPU
+        if self.use_multi_gpu:
+            self.student = nn.DataParallel(self.student)
+            self.model_without_parallel = self.student.module
+        else:
+            self.model_without_parallel = self.student
         
         # Setup data
         self.train_dataset = EEGDataset(
@@ -67,14 +88,16 @@ class Trainer:
             batch_size=config.training.batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=config.training.num_workers
+            num_workers=config.training.num_workers,
+            pin_memory=True if self.device.type == 'cuda' else False
         )
         self.val_loader = DataLoader(
             self.val_dataset,
             batch_size=config.training.batch_size,
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=config.training.num_workers
+            num_workers=config.training.num_workers,
+            pin_memory=True if self.device.type == 'cuda' else False
         )
         
         # Optimization
@@ -96,8 +119,8 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch + 1}/{self.config.training.epochs}")
         
         for eeg, mel in pbar:
-            eeg = eeg.to(self.device)
-            mel = mel.to(self.device)
+            eeg = eeg.to(self.device, non_blocking=True)
+            mel = mel.to(self.device, non_blocking=True)
             
             self.optimizer.zero_grad()
             
@@ -132,8 +155,8 @@ class Trainer:
         
         with torch.no_grad():
             for eeg, mel in tqdm(self.val_loader, desc="Validating", leave=False):
-                eeg = eeg.to(self.device)
-                mel = mel.to(self.device)
+                eeg = eeg.to(self.device, non_blocking=True)
+                mel = mel.to(self.device, non_blocking=True)
                 
                 # Teacher forward
                 teacher_features = self.teacher_encoder(mel)
@@ -158,7 +181,7 @@ class Trainer:
         """Save model checkpoint"""
         checkpoint = {
             'epoch': self.current_epoch,
-            'model_state_dict': self.student.state_dict(),
+            'model_state_dict': self.model_without_parallel.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_loss': self.best_val_loss,
             'config': self.config.to_dict()
