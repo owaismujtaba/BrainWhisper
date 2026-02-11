@@ -93,11 +93,11 @@ class Trainer:
         )
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=config.training.batch_size,
+            batch_size=max(1, config.training.batch_size // 2),  # Use half batch size for validation
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=config.training.num_workers,
-            pin_memory=True if self.device.type == 'cuda' else False
+            num_workers=0,  # Disable multiprocessing for validation
+            pin_memory=False  # Disable pin_memory to avoid potential issues
         )
         
         # Optimization
@@ -174,7 +174,7 @@ class Trainer:
                 
                 loss = self.criterion(student_features, teacher_features)
                 total_loss += loss.item()
-        
+                
         return total_loss / len(self.val_loader)
     
     def save_checkpoint(self, filename):

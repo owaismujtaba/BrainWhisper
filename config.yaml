@@ -26,10 +26,10 @@ model:
 
 # Training
 training:
-  batch_size: 8
-  epochs: 50
+  batch_size: 32
+  epochs: 1000
   learning_rate: 0.0001
-  num_workers: 4
+  num_workers: 2
   device: "cuda"  # cuda or cpu
   save_best: true
   distributed: true  # Enable multi-GPU with DataParallel (automatic if multiple GPUs available)
