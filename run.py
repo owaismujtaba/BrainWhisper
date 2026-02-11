@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from brainwhisper.utils import load_config
-from brainwhisper.data import AudioGenerator
+from brainwhisper.dataset import AudioGenerator
 from brainwhisper.training import Trainer
 
 
@@ -66,7 +66,8 @@ def main():
         type=str,
         choices=["generate_audio", "train"],
         required=True,
-        help="Mode to run: generate_audio or train"
+        help="Mode to run: generate_audio or train",
+        default="train"
     )
     parser.add_argument(
         "--config",
