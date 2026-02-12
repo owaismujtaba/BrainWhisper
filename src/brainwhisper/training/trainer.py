@@ -1,4 +1,4 @@
-"""Training logic for EEG encoder with multi-GPU support"""
+"""Training module for EEG encoder"""
 
 import os
 import torch
@@ -6,7 +6,10 @@ import torch.nn as nn
 import torch.optim as optim
 import whisper
 from tqdm import tqdm
+from pathlib import Path
 from torch.utils.data import DataLoader
+import logging
+from datetime import datetime
 
 from ..models import EEGEncoder
 from ..dataset import EEGDataset, collate_fn
@@ -24,21 +27,40 @@ class Trainer:
         """
         self.config = config
         
+        # Setup logging
+        log_dir = Path(config.paths.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        log_file = log_dir / "train.log"
+        
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+        
+        self.logger.info(f"Starting training session - Log file: {log_file}")
+
         # Setup device
         if torch.cuda.is_available() and config.training.device == "cuda":
             self.device = torch.device("cuda")
             self.use_multi_gpu = config.training.distributed and torch.cuda.device_count() > 1
             if self.use_multi_gpu:
-                print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+                self.logger.info(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
             else:
-                print(f"Using single GPU: {torch.cuda.get_device_name(0)}")
+                self.logger.info(f"Using single GPU: {torch.cuda.get_device_name(0)}")
         else:
             self.device = torch.device("cpu")
             self.use_multi_gpu = False
-            print("Using CPU")
+            self.logger.info("Using CPU")
         
         # Load Teacher (Whisper)
-        print("Loading Whisper Teacher model...")
+        self.logger.info("Loading Whisper Teacher model...")
         self.whisper_model = whisper.load_model(config.model.whisper_model, device=self.device)
         self.teacher_encoder = self.whisper_model.encoder
         self.teacher_encoder.eval()
@@ -50,7 +72,7 @@ class Trainer:
             self.teacher_encoder = nn.DataParallel(self.teacher_encoder)
         
         # Initialize Student (EEG Encoder)
-        print("Initializing EEG Encoder Student...")
+        self.logger.info("Initializing EEG Encoder Student...")
         embed_dim = self.whisper_model.dims.n_audio_state
         self.student = EEGEncoder(
             input_channels=config.model.eeg_channels,
@@ -70,18 +92,23 @@ class Trainer:
             self.model_without_parallel = self.student
         
         # Setup data
+        self.logger.info(f"Scanning dataset for split '{config.data.train_split}'...")
         self.train_dataset = EEGDataset(
             config.paths.data_dir,
             config.paths.audio_dir,
             split=config.data.train_split,
             limit=config.data.limit
         )
+        self.logger.info(f"Found {len(self.train_dataset)} samples.")
+        
+        self.logger.info(f"Scanning dataset for split '{config.data.val_split}'...")
         self.val_dataset = EEGDataset(
             config.paths.data_dir,
             config.paths.audio_dir,
             split=config.data.val_split,
             limit=config.data.limit
         )
+        self.logger.info(f"Found {len(self.val_dataset)} samples.")
         
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -97,12 +124,11 @@ class Trainer:
         
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=val_batch_size,
+            batch_size=config.training.batch_size,
             shuffle=False,
             collate_fn=collate_fn,
             num_workers=config.training.num_workers,
-            pin_memory=True if self.device.type == 'cuda' else False,
-            drop_last=True  # Drop last incomplete batch to ensure alignment
+            pin_memory=True if self.device.type == 'cuda' else False
         )
         
         # Optimization
@@ -182,13 +208,6 @@ class Trainer:
                 
                 loss = self.criterion(student_features, teacher_features)
                 total_loss += loss.item()
-                
-                # Clear intermediate tensors
-                del eeg, mel, teacher_features, student_features, loss
-        
-        # Clear CUDA cache after validation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
         
         return total_loss / len(self.val_loader)
     
@@ -203,11 +222,20 @@ class Trainer:
         }
         path = os.path.join(self.config.paths.checkpoint_dir, filename)
         torch.save(checkpoint, path)
-        print(f"Saved checkpoint: {path}")
+        self.logger.info(f"Saved checkpoint: {path}")
     
     def train(self):
         """Main training loop"""
-        for epoch in range(self.config.training.epochs):
+        self.logger.info("=" * 60)
+        self.logger.info("STARTING TRAINING")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Total epochs: {self.config.training.epochs}")
+        self.logger.info(f"Batch size: {self.config.training.batch_size}")
+        self.logger.info(f"Learning rate: {self.config.training.learning_rate}")
+        self.logger.info(f"Training samples: {len(self.train_dataset)}")
+        self.logger.info(f"Validation samples: {len(self.val_dataset)}")
+        
+        for epoch in range(1, self.config.training.epochs + 1):
             self.current_epoch = epoch
             
             # Train
@@ -216,19 +244,30 @@ class Trainer:
             # Validate
             val_loss = self.validate()
             
-            print(f"Epoch {epoch + 1}: Train Loss = {train_loss:.4f}, Val Loss = {val_loss:.4f}")
+            # Log metrics
+            self.logger.info(f"Epoch {epoch}/{self.config.training.epochs} - "
+                           f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
             
             # Save best model
             if self.config.training.save_best and val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                self.save_checkpoint("best_eeg_encoder.pth")
-                print("Saved best model.")
+                best_path = os.path.join(self.config.paths.checkpoint_dir, "best_eeg_encoder.pth")
+                self.save_checkpoint(best_path)
+                self.logger.info(f"✓ New best model saved! Val Loss: {val_loss:.4f}")
             
-            # Save regular checkpoint
-            if (epoch + 1) % self.config.logging.save_interval == 0:
-                self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pth")
-            
-            # Always save last
-            self.save_checkpoint("last_eeg_encoder.pth")
+            # Save checkpoint every 10 epochs
+            if epoch % 10 == 0:
+                checkpoint_path = os.path.join(
+                    self.config.paths.checkpoint_dir,
+                    f"checkpoint_epoch_{epoch}.pth"
+                )
+                self.save_checkpoint(checkpoint_path)
+                self.logger.info(f"Checkpoint saved: {checkpoint_path}")
         
-        print("Training complete!")
+        # Save final model
+        final_path = os.path.join(self.config.paths.checkpoint_dir, "last_eeg_encoder.pth")
+        self.save_checkpoint(final_path)
+        self.logger.info("=" * 60)
+        self.logger.info("TRAINING COMPLETE")
+        self.logger.info(f"Best validation loss: {self.best_val_loss:.4f}")
+        self.logger.info("=" * 60)
