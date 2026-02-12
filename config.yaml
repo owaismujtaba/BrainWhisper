@@ -26,7 +26,7 @@ model:
 
 # Training
 training:
-  batch_size: 32
+  batch_size: 40
   epochs: 1000
   learning_rate: 0.0001
   num_workers: 2
@@ -43,4 +43,4 @@ data:
 # Logging
 logging:
   log_interval: 10  # Log every N batches
-  save_interval: 1  # Save checkpoint every N epochs
+  save_interval: 100  # Save checkpoint every N epochs

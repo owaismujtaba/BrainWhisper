@@ -91,13 +91,18 @@ class Trainer:
             num_workers=config.training.num_workers,
             pin_memory=True if self.device.type == 'cuda' else False
         )
+        # Calculate validation batch size (must be divisible by number of GPUs)
+        num_gpus = torch.cuda.device_count() if self.use_multi_gpu else 1
+        val_batch_size = max(num_gpus, (config.training.batch_size // 2) // num_gpus * num_gpus)
+        
         self.val_loader = DataLoader(
             self.val_dataset,
-            batch_size=max(1, config.training.batch_size // 2),  # Use half batch size for validation
+            batch_size=val_batch_size,
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=0,  # Disable multiprocessing for validation
-            pin_memory=False  # Disable pin_memory to avoid potential issues
+            num_workers=config.training.num_workers,
+            pin_memory=True if self.device.type == 'cuda' else False,
+            drop_last=True  # Drop last incomplete batch to ensure alignment
         )
         
         # Optimization
@@ -150,7 +155,10 @@ class Trainer:
     
     def validate(self):
         """Validate the model"""
-        self.student.eval()
+        # Use unwrapped model for validation to avoid DataParallel issues
+        model_to_validate = self.model_without_parallel
+        model_to_validate.eval()
+        
         total_loss = 0
         
         with torch.no_grad():
@@ -161,8 +169,8 @@ class Trainer:
                 # Teacher forward
                 teacher_features = self.teacher_encoder(mel)
                 
-                # Student forward
-                student_features = self.student(eeg)
+                # Student forward (using unwrapped model)
+                student_features = model_to_validate(eeg)
                 
                 # Align temporal dimension if needed
                 if student_features.shape[1] != teacher_features.shape[1]:
@@ -175,6 +183,13 @@ class Trainer:
                 loss = self.criterion(student_features, teacher_features)
                 total_loss += loss.item()
                 
+                # Clear intermediate tensors
+                del eeg, mel, teacher_features, student_features, loss
+        
+        # Clear CUDA cache after validation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         return total_loss / len(self.val_loader)
     
     def save_checkpoint(self, filename):
