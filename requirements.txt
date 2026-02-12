@@ -7,6 +7,7 @@ transformers>=4.30.0
 tokenizers>=0.13.0
 accelerate>=0.20.0
 jiwer
+wandb>=0.16.0
 soundfile
 openai-whisper
 torchaudio

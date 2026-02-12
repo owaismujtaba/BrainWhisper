@@ -10,6 +10,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 import logging
 from datetime import datetime
+import wandb
 
 from ..models import EEGEncoder
 from ..dataset import EEGDataset, collate_fn
@@ -58,6 +59,46 @@ class Trainer:
             self.device = torch.device("cpu")
             self.use_multi_gpu = False
             self.logger.info("Using CPU")
+        
+        # Initialize Weights & Biases
+        self.use_wandb = hasattr(config, 'wandb') and config.wandb.enabled
+        if self.use_wandb:
+            wandb.init(
+                project=config.wandb.project,
+                entity=config.wandb.entity,
+                name=config.wandb.name,
+                tags=config.wandb.tags,
+                notes=config.wandb.notes,
+                config={
+                    "model": {
+                        "eeg_channels": config.model.eeg_channels,
+                        "whisper_model": config.model.whisper_model,
+                        "hidden_dim": config.model.hidden_dim,
+                        "num_cnn_layers": config.model.num_cnn_layers,
+                        "kernel_size": config.model.kernel_size,
+                        "stride": config.model.stride,
+                        "dropout": config.model.dropout,
+                        "num_transformer_layers": config.model.num_transformer_layers,
+                        "num_attention_heads": config.model.num_attention_heads,
+                    },
+                    "training": {
+                        "batch_size": config.training.batch_size,
+                        "epochs": config.training.epochs,
+                        "learning_rate": config.training.learning_rate,
+                        "num_workers": config.training.num_workers,
+                        "distributed": config.training.distributed,
+                    },
+                    "data": {
+                        "train_split": config.data.train_split,
+                        "val_split": config.data.val_split,
+                        "train_samples": 0,  # Will update after dataset loading
+                        "val_samples": 0,
+                    }
+                }
+            )
+            self.logger.info(f"Weights & Biases initialized - Project: {config.wandb.project}")
+        else:
+            self.logger.info("Weights & Biases disabled")
         
         # Load Teacher (Whisper)
         self.logger.info("Loading Whisper Teacher model...")
@@ -109,6 +150,13 @@ class Trainer:
             limit=config.data.limit
         )
         self.logger.info(f"Found {len(self.val_dataset)} samples.")
+        
+        # Update wandb config with dataset sizes
+        if self.use_wandb:
+            wandb.config.update({
+                "data/train_samples": len(self.train_dataset),
+                "data/val_samples": len(self.val_dataset)
+            })
         
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -211,8 +259,11 @@ class Trainer:
         
         return total_loss / len(self.val_loader)
     
-    def save_checkpoint(self, filename):
+    def save_checkpoint(self, path):
         """Save model checkpoint"""
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        
         checkpoint = {
             'epoch': self.current_epoch,
             'model_state_dict': self.model_without_parallel.state_dict(),
@@ -220,7 +271,7 @@ class Trainer:
             'best_val_loss': self.best_val_loss,
             'config': self.config.to_dict()
         }
-        path = os.path.join(self.config.paths.checkpoint_dir, filename)
+        
         torch.save(checkpoint, path)
         self.logger.info(f"Saved checkpoint: {path}")
     
@@ -248,12 +299,26 @@ class Trainer:
             self.logger.info(f"Epoch {epoch}/{self.config.training.epochs} - "
                            f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
             
+            # Log to wandb
+            if self.use_wandb:
+                wandb.log({
+                    "epoch": epoch,
+                    "train/loss": train_loss,
+                    "val/loss": val_loss,
+                    "val/best_loss": self.best_val_loss
+                }, step=epoch)
+            
             # Save best model
             if self.config.training.save_best and val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 best_path = os.path.join(self.config.paths.checkpoint_dir, "best_eeg_encoder.pth")
                 self.save_checkpoint(best_path)
                 self.logger.info(f"✓ New best model saved! Val Loss: {val_loss:.4f}")
+                
+                # Log best model to wandb
+                if self.use_wandb:
+                    wandb.run.summary["best_val_loss"] = val_loss
+                    wandb.run.summary["best_epoch"] = epoch
             
             # Save checkpoint every 10 epochs
             if epoch % 10 == 0:
@@ -271,3 +336,8 @@ class Trainer:
         self.logger.info("TRAINING COMPLETE")
         self.logger.info(f"Best validation loss: {self.best_val_loss:.4f}")
         self.logger.info("=" * 60)
+        
+        # Finish wandb run
+        if self.use_wandb:
+            wandb.finish()
+
