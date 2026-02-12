@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict
+import logging
 
 from ..models import EEGEncoder
 
@@ -25,14 +26,36 @@ class InferencePipeline:
         self.config = config
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         
-        print(f"Loading inference pipeline on {self.device}...")
+        # Setup logging
+        log_dir = Path(config.paths.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "inference.log"
+        
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file),
+                logging.StreamHandler()
+            ],
+            force=True  # Override any existing configuration
+        )
+        self.logger = logging.getLogger(__name__)
+        
+        self.logger.info("=" * 60)
+        self.logger.info("INFERENCE PIPELINE INITIALIZATION")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Log file: {log_file}")
+        self.logger.info(f"Device: {self.device}")
+        self.logger.info(f"Checkpoint: {checkpoint_path}")
         
         # Load Whisper model
-        print("Loading Whisper model...")
+        self.logger.info("Loading Whisper model...")
         self.whisper_model = whisper.load_model(config.model.whisper_model, device=self.device)
         
         # Load trained EEG encoder
-        print(f"Loading EEG encoder from {checkpoint_path}...")
+        self.logger.info(f"Loading EEG encoder from checkpoint...")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
         embed_dim = self.whisper_model.dims.n_audio_state
@@ -49,7 +72,8 @@ class InferencePipeline:
         self.eeg_encoder.load_state_dict(checkpoint['model_state_dict'])
         self.eeg_encoder.eval()
         
-        print("Inference pipeline ready!")
+        self.logger.info("Inference pipeline ready!")
+        self.logger.info("=" * 60)
     
     def load_eeg_from_hdf5(self, hdf5_path: str, trial_name: str) -> torch.Tensor:
         """
@@ -167,9 +191,10 @@ class InferencePipeline:
         Returns:
             List of prediction results with metadata
         """
+        self.logger.info(f"Starting batch prediction on {len(hdf5_files)} samples...")
         results = []
         
-        for hdf5_path, trial_name in hdf5_files:
+        for idx, (hdf5_path, trial_name) in enumerate(hdf5_files, 1):
             try:
                 # Get ground truth if available
                 ground_truth = None
@@ -187,6 +212,8 @@ class InferencePipeline:
                 # Generate prediction
                 prediction = self.predict_from_file(hdf5_path, trial_name)
                 
+                self.logger.info(f"[{idx}/{len(hdf5_files)}] {trial_name}: Success")
+                
                 results.append({
                     'file': hdf5_path,
                     'trial': trial_name,
@@ -195,7 +222,7 @@ class InferencePipeline:
                 })
                 
             except Exception as e:
-                print(f"Error processing {hdf5_path}/{trial_name}: {e}")
+                self.logger.error(f"[{idx}/{len(hdf5_files)}] {trial_name}: Error - {e}")
                 results.append({
                     'file': hdf5_path,
                     'trial': trial_name,
@@ -204,4 +231,5 @@ class InferencePipeline:
                     'error': str(e)
                 })
         
+        self.logger.info(f"Batch prediction complete: {len(results)} samples processed")
         return results

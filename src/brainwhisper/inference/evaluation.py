@@ -77,19 +77,28 @@ def print_evaluation_report(results: List[Dict]):
     Args:
         results: List of result dictionaries from batch_predict
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     metrics = evaluate_results(results)
     
-    print("\n" + "=" * 60)
-    print("EVALUATION REPORT")
-    print("=" * 60)
-    print(f"Total samples: {len(results)}")
-    print(f"Valid predictions: {metrics['num_samples']}")
-    print(f"Errors: {metrics['num_errors']}")
+    report = []
+    report.append("\n" + "=" * 60)
+    report.append("EVALUATION REPORT")
+    report.append("=" * 60)
+    report.append(f"Total samples: {len(results)}")
+    report.append(f"Valid predictions: {metrics['num_samples']}")
+    report.append(f"Errors: {metrics['num_errors']}")
     
     if metrics['wer'] is not None:
-        print(f"\nWord Error Rate (WER): {metrics['wer']:.4f}")
-        print(f"Character Error Rate (CER): {metrics['cer']:.4f}")
+        report.append(f"\nWord Error Rate (WER): {metrics['wer']:.4f}")
+        report.append(f"Character Error Rate (CER): {metrics['cer']:.4f}")
     else:
-        print("\nNo valid predictions to evaluate")
+        report.append("\nNo valid predictions to evaluate")
     
-    print("=" * 60)
+    report.append("=" * 60)
+    
+    # Print and log
+    report_text = "\n".join(report)
+    print(report_text)
+    logger.info(report_text)
