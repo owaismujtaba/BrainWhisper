@@ -12,6 +12,11 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+# Fix for containerized environments without usernames (e.g., DGX/Kubernetes)
+import os
+os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(os.getcwd(), ".torch_compile"))
+os.environ.setdefault("TRITON_CACHE_DIR", os.path.join(os.getcwd(), ".triton"))
+
 from brainwhisper.utils import load_config
 from brainwhisper.dataset import AudioGenerator
 from brainwhisper.training import Trainer
@@ -107,14 +112,29 @@ def run_inference(config, checkpoint_path, hdf5_path, trial_name):
         print_evaluation_report(results)
 
 
+def convert_data(config):
+    """Convert audio files to 16kHz"""
+    print("=" * 60)
+    print("AUDIO CONVERSION MODE")
+    print("=" * 60)
+    
+    from brainwhisper.dataset.audio_generator import convert_audio_to_16khz
+    
+    # Use audio_dir from config if available, else default to "data"
+    data_dir = config.paths.audio_dir if hasattr(config.paths, 'audio_dir') else "data"
+    print(f"Target directory: {data_dir}")
+    
+    convert_audio_to_16khz(data_dir)
+
+
 def main():
     parser = argparse.ArgumentParser(description="BrainWhisper: EEG-to-Text")
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["generate_audio", "train", "inference"],
+        choices=["generate_audio", "train", "inference", "convert"],
         required=True,
-        help="Mode to run: generate_audio, train, or inference",
+        help="Mode to run: generate_audio, train, inference, or convert",
         default="train"
     )
     parser.add_argument(
@@ -155,6 +175,8 @@ def main():
         train_model(config)
     elif args.mode == "inference":
         run_inference(config, args.checkpoint, args.hdf5, args.trial)
+    elif args.mode == "convert":
+        convert_data(config)
 
 
 if __name__ == "__main__":

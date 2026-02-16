@@ -100,13 +100,29 @@ class Trainer:
         else:
             self.logger.info("Weights & Biases disabled")
         
+        # Clear GPU cache before loading Whisper to avoid OOM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         # Load Teacher (Whisper)
         self.logger.info("Loading Whisper Teacher model...")
         self.whisper_model = whisper.load_model(config.model.whisper_model, device=self.device)
         self.teacher_encoder = self.whisper_model.encoder
+        
         self.teacher_encoder.eval()
         for p in self.teacher_encoder.parameters():
             p.requires_grad = False
+        
+        # Unfreeze decoder cross-attention layers for fine-tuning
+        self.logger.info("Unfreezing decoder cross-attention layers...")
+        decoder_trainable_params = 0
+        for name, param in self.whisper_model.decoder.named_parameters():
+            if 'cross_attn' in name:
+                param.requires_grad = True
+                decoder_trainable_params += param.numel()
+            else:
+                param.requires_grad = False
+        self.logger.info(f"Decoder trainable parameters: {decoder_trainable_params:,}")
         
         # Wrap teacher with DataParallel if using multi-GPU
         if self.use_multi_gpu:
@@ -166,6 +182,7 @@ class Trainer:
             num_workers=config.training.num_workers,
             pin_memory=True if self.device.type == 'cuda' else False
         )
+
         # Calculate validation batch size (must be divisible by number of GPUs)
         num_gpus = torch.cuda.device_count() if self.use_multi_gpu else 1
         val_batch_size = max(num_gpus, (config.training.batch_size // 2) // num_gpus * num_gpus)
@@ -181,7 +198,23 @@ class Trainer:
         
         # Optimization
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.AdamW(self.student.parameters(), lr=config.training.learning_rate)
+        self.decoder_criterion = nn.CrossEntropyLoss(ignore_index=-100)
+        
+        # Collect decoder trainable parameters
+        decoder_params = [p for p in self.whisper_model.decoder.parameters() if p.requires_grad]
+        
+        # Optimizer includes both student and decoder cross-attention
+        self.optimizer = optim.AdamW(
+            list(self.student.parameters()) + decoder_params,
+            lr=config.training.learning_rate
+        )
+        
+        # Initialize tokenizer for decoder training
+        self.tokenizer = whisper.tokenizer.get_tokenizer(
+            multilingual=self.whisper_model.is_multilingual,
+            language="en",
+            task="transcribe"
+        )
         
         # Tracking
         self.best_val_loss = float('inf')
@@ -189,15 +222,21 @@ class Trainer:
         
         # Create checkpoint directory
         os.makedirs(config.paths.checkpoint_dir, exist_ok=True)
+        
+        # Load checkpoint if available
+        self.load_checkpoint_if_exists()
     
     def train_epoch(self):
         """Train for one epoch"""
         self.student.train()
-        total_loss = 0
+        self.whisper_model.decoder.train()  # Train decoder cross-attention
+        total_encoder_loss = 0
+        total_decoder_loss = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch + 1}/{self.config.training.epochs}")
         
-        for eeg, mel in pbar:
+        for eeg, mel, transcriptions in pbar:
+
             eeg = eeg.to(self.device, non_blocking=True)
             mel = mel.to(self.device, non_blocking=True)
             
@@ -218,14 +257,68 @@ class Trainer:
                     mode='linear'
                 ).transpose(1, 2)
             
-            loss = self.criterion(pred_emb, target_emb)
-            loss.backward()
+            # Encoder loss (EEG encoder matching Whisper encoder)
+            encoder_loss = self.criterion(pred_emb, target_emb)
+            
+            # Decoder loss (teacher forcing with ground truth)
+            decoder_loss = torch.tensor(0.0, device=self.device)
+            if transcriptions and any(transcriptions):  # Only if we have transcriptions
+                try:
+                    # Tokenize transcriptions
+                    tokens_list = []
+                    for text in transcriptions:
+                        if text:  # Skip empty transcriptions
+                            tokens = self.tokenizer.encode(text)
+                            # Add SOT sequence
+                            tokens = list(self.tokenizer.sot_sequence) + tokens + [self.tokenizer.eot]
+                            tokens_list.append(tokens)
+                    
+                    if tokens_list:
+                        # Pad to same length
+                        max_len = max(len(t) for t in tokens_list)
+                        padded_inputs = []
+                        padded_labels = []
+                        
+                        for tokens in tokens_list:
+                            pad_len = max_len - len(tokens)
+                            # Input: pad with EOT (valid token)
+                            padded_inputs.append(tokens + [self.tokenizer.eot] * pad_len)
+                            # Label: pad with -100 (ignore index)
+                            padded_labels.append(tokens + [-100] * pad_len)
+                        
+                        input_tensor = torch.tensor(padded_inputs, device=self.device)
+                        label_tensor = torch.tensor(padded_labels, device=self.device)
+                        
+                        # Teacher forcing: predict next token given previous tokens
+                        logits = self.whisper_model.decoder(input_tensor[:, :-1], pred_emb)
+                        
+                        # Calculate loss
+                        decoder_loss = self.decoder_criterion(
+                            logits.reshape(-1, logits.shape[-1]),
+                            label_tensor[:, 1:].reshape(-1)
+                        )
+                except Exception as e:
+                    # If decoder loss fails, just use encoder loss
+                    self.logger.warning(f"Decoder loss calculation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    pass
+            
+            # Combined loss
+            total_loss = encoder_loss + decoder_loss
+            total_loss.backward()
             self.optimizer.step()
             
-            total_loss += loss.item()
-            pbar.set_postfix({'loss': loss.item()})
+            total_encoder_loss += encoder_loss.item()
+            total_decoder_loss += decoder_loss.item() if isinstance(decoder_loss, torch.Tensor) else 0
+            pbar.set_postfix({
+                'enc_loss': encoder_loss.item(),
+                'dec_loss': decoder_loss.item() if isinstance(decoder_loss, torch.Tensor) else 0
+            })
         
-        return total_loss / len(self.train_loader)
+        avg_encoder_loss = total_encoder_loss / len(self.train_loader)
+        avg_decoder_loss = total_decoder_loss / len(self.train_loader)
+        return avg_encoder_loss + avg_decoder_loss, avg_encoder_loss, avg_decoder_loss
     
     def validate(self):
         """Validate the model"""
@@ -236,7 +329,7 @@ class Trainer:
         total_loss = 0
         
         with torch.no_grad():
-            for eeg, mel in tqdm(self.val_loader, desc="Validating", leave=False):
+            for eeg, mel, transcriptions in tqdm(self.val_loader, desc="Validating", leave=False):
                 eeg = eeg.to(self.device, non_blocking=True)
                 mel = mel.to(self.device, non_blocking=True)
                 
@@ -258,6 +351,38 @@ class Trainer:
                 total_loss += loss.item()
         
         return total_loss / len(self.val_loader)
+    
+    def load_checkpoint_if_exists(self):
+        """Load checkpoint if available to resume training"""
+        best_checkpoint_path = os.path.join(self.config.paths.checkpoint_dir, "best_eeg_encoder.pth")
+        
+        if os.path.exists(best_checkpoint_path):
+            try:
+                self.logger.info(f"Found existing checkpoint: {best_checkpoint_path}")
+                checkpoint = torch.load(best_checkpoint_path, map_location=self.device)
+                
+                # Load model state
+                self.model_without_parallel.load_state_dict(checkpoint['model_state_dict'])
+                
+                # Load optimizer state
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                
+                # Load training state
+                self.current_epoch = checkpoint.get('epoch', 0)
+                self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                
+                self.logger.info(f"✓ Resumed from epoch {self.current_epoch}")
+                self.logger.info(f"✓ Best validation loss: {self.best_val_loss:.4f}")
+                
+                # Update wandb if enabled
+                if self.use_wandb:
+                    wandb.config.update({"resumed_from_epoch": self.current_epoch})
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to load checkpoint: {e}")
+                self.logger.warning("Starting training from scratch")
+        else:
+            self.logger.info("No existing checkpoint found. Starting training from scratch.")
     
     def save_checkpoint(self, path):
         """Save model checkpoint"""
@@ -290,20 +415,23 @@ class Trainer:
             self.current_epoch = epoch
             
             # Train
-            train_loss = self.train_epoch()
+            train_loss, train_enc_loss, train_dec_loss = self.train_epoch()
             
             # Validate
             val_loss = self.validate()
             
             # Log metrics
             self.logger.info(f"Epoch {epoch}/{self.config.training.epochs} - "
-                           f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+                           f"Train Loss: {train_loss:.4f} (Enc: {train_enc_loss:.4f}, Dec: {train_dec_loss:.4f}), "
+                           f"Val Loss: {val_loss:.4f}")
             
             # Log to wandb
             if self.use_wandb:
                 wandb.log({
                     "epoch": epoch,
                     "train/loss": train_loss,
+                    "train/encoder_loss": train_enc_loss,
+                    "train/decoder_loss": train_dec_loss,
                     "val/loss": val_loss,
                     "val/best_loss": self.best_val_loss
                 }, step=epoch)
@@ -319,6 +447,27 @@ class Trainer:
                 if self.use_wandb:
                     wandb.run.summary["best_val_loss"] = val_loss
                     wandb.run.summary["best_epoch"] = epoch
+                    
+                    # Upload model as artifact
+                    try:
+                        artifact = wandb.Artifact(
+                            name=f"eeg-encoder-best",
+                            type="model",
+                            description=f"Best EEG encoder model at epoch {epoch} with val_loss={val_loss:.4f}",
+                            metadata={
+                                "epoch": epoch,
+                                "val_loss": val_loss,
+                                "train_loss": train_loss,
+                                "architecture": "EEG-to-Whisper",
+                                "whisper_model": self.config.model.whisper_model,
+                                "eeg_channels": self.config.model.eeg_channels,
+                            }
+                        )
+                        artifact.add_file(best_path)
+                        wandb.log_artifact(artifact)
+                        self.logger.info("✓ Model uploaded to W&B artifacts")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to upload model to W&B: {e}")
             
             # Save checkpoint every 10 epochs
             if epoch % 10 == 0:

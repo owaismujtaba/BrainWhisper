@@ -1,10 +1,13 @@
 """Audio generation from text using TTS"""
 
 import os
+import numpy as np
 import h5py
 from pathlib import Path
 from tqdm import tqdm
-
+from TTS.api import TTS
+import torch
+import pdb
 
 class AudioGenerator:
     """Generate synthetic audio from text transcriptions using TTS"""
@@ -17,8 +20,6 @@ class AudioGenerator:
             tts_model: TTS model name
             use_gpu: Whether to use GPU if available
         """
-        from TTS.api import TTS
-        import torch
         
         self.use_gpu = use_gpu and torch.cuda.is_available()
         
@@ -71,7 +72,6 @@ class AudioGenerator:
                     
                     for trial_name in tqdm(trials, desc=f"Processing {subject_name}/{hdf5_file.name}"):
                         trial = f[trial_name]
-                        
                         # Get transcription
                         if 'transcription' not in trial:
                             continue
@@ -104,7 +104,8 @@ class AudioGenerator:
                         try:
                             self.tts.tts_to_file(
                                 text=text,
-                                file_path=output_file
+                                file_path=output_file,
+                                language="en"
                             )
                             count += 1
                         except Exception as e:
@@ -113,4 +114,49 @@ class AudioGenerator:
             except Exception as e:
                 print(f"Error processing {hdf5_file}: {e}")
         
-        print(f"Finished! Generated {count} audio files in {os.path.join(output_dir, split)}")
+def convert_audio_to_16khz(data_dir="data"):
+    """Convert all audio files in directory to 16kHz"""
+    import soundfile as sf
+    import librosa
+    from pathlib import Path
+    
+    print(f"Searching for audio files in {data_dir}...")
+    audio_files = sorted(Path(data_dir).rglob("*.wav"))
+    print(f"Found {len(audio_files)} audio files.")
+    
+    count = 0
+    for audio_path in tqdm(audio_files, desc="Converting audio"):
+        try:
+            # Read audio
+            # soundfile matches librosa's behavior but is faster for read/write
+            # however librosa.resample needs numpy array
+            audio, sr = sf.read(str(audio_path))
+            
+            if sr != 16000:
+                # Resample
+                # librosa expects (channels, time) but soundfile returns (time, channels)
+                # librosa.resample handles 1D or 2D. 
+                # If stereo, it resamples each channel.
+                
+                # Check if stereo (Time, Channels)
+                is_stereo = len(audio.shape) > 1
+                if is_stereo:
+                    audio = audio.T # Convert to (Channels, Time) for librosa
+                    
+                audio_16k = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+                
+                if is_stereo:
+                    audio_16k = audio_16k.T # Convert back to (Time, Channels) for soundfile
+                
+                # Write back to same path (overwrite)
+                sf.write(str(audio_path), audio_16k, 16000)
+                count += 1
+                
+        except Exception as e:
+            print(f"Error processing {audio_path}: {e}")
+            
+    print(f"Converted {count} files to 16kHz.")
+
+if __name__ == "__main__":
+    # If run directly, run conversion
+    convert_audio_to_16khz()

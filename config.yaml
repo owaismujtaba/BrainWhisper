@@ -11,7 +11,8 @@ paths:
 audio:
   tts_model: "tts_models/en/ljspeech/tacotron2-DDC"
   output_format: "wav"
-  use_gpu: true
+  use_gpu: False
+  
 
 # Model Architecture
 model:

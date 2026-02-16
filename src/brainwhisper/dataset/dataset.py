@@ -82,6 +82,16 @@ class EEGDataset(Dataset):
                     if isinstance(trial[k], h5py.Dataset) and len(trial[k].shape) >= 2:
                         eeg_data = trial[k][()]
                         break
+            
+            # Get transcription
+            # Try 'sentence_label' first (common in this dataset)
+            transcription = trial.attrs.get('sentence_label', '')
+            # If not found, try 'transcription' attribute
+            if not transcription:
+                transcription = trial.attrs.get('transcription', '')
+                
+            if isinstance(transcription, bytes):
+                transcription = transcription.decode('utf-8')
         
         # input_features is already in (Time, Channels) format: (910, 512)
         # No need to transpose
@@ -118,12 +128,12 @@ class EEGDataset(Dataset):
         audio = whisper.pad_or_trim(audio)
         mel = whisper.log_mel_spectrogram(audio)
         
-        return eeg_tensor, mel
+        return eeg_tensor, mel, transcription
 
 
 def collate_fn(batch):
     """Custom collate function to handle variable-length EEG sequences"""
-    eegs, mels = zip(*batch)
+    eegs, mels, transcriptions = zip(*batch)
     
     # EEG shape is (Time, Channels) from input_features
     # Pad EEG to max length in batch along time dimension (dim=0)
@@ -142,4 +152,4 @@ def collate_fn(batch):
     eeg_batch = torch.stack(padded_eegs)
     mel_batch = torch.stack(mels)
     
-    return eeg_batch, mel_batch
+    return eeg_batch, mel_batch, list(transcriptions)
